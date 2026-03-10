@@ -1,1 +1,19 @@
-/.venv
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets
+.env
+
+# Generated proof artifacts
+proof.json
+proof_inputs.json
+
+# Rust build artifacts
+prover/target/
+soroban/target/
+
+# Claude
+.claude/

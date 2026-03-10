@@ -1,0 +1,5 @@
+[target.riscv32im-risc0-zkvm-elf]
+rustflags = ['--cfg', 'getrandom_backend="custom"']
+
+# Fallback: set via RUSTFLAGS env var when invoking cargo
+# RUSTFLAGS='--cfg getrandom_backend="custom"' cargo build ...

@@ -1,0 +1,19 @@
+[package]
+name = "sphincs-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+risc0-zkvm = { workspace = true }
+sphincs-methods = { path = "../methods" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"
+boundless-market = { version = "1.3.3", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+anyhow = { version = "1", optional = true }
+url = { version = "2", optional = true }
+
+[features]
+boundless = ["dep:boundless-market", "dep:tokio", "dep:anyhow", "dep:url"]

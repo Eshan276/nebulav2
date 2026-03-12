@@ -17,8 +17,15 @@ case "$OS" in
       *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
     ;;
+  Darwin)
+    case "$ARCH" in
+      arm64)  ASSET="nebula-macos-aarch64" ;;
+      x86_64) ASSET="nebula-macos-x86_64" ;;
+      *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+    esac
+    ;;
   *)
-    echo "Unsupported OS: $OS (only Linux is supported right now)"
+    echo "Unsupported OS: $OS"
     exit 1
     ;;
 esac

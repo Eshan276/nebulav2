@@ -230,10 +230,16 @@ pub fn main() {
 
     assert_eq!(computed_root, root, "XMSS signature verification failed");
 
-    // Commit public outputs
+    // Commit public outputs.
+    // Commit the wallet nonce from tx_bytes[64..68] (LE u32), NOT the XMSS leaf index.
+    // This decouples the on-chain replay-protection counter from the XMSS leaf position,
+    // so wallets starting at nonce=0 work correctly even if earlier leaves were burned.
+    assert!(tx_bytes.len() >= 68, "tx_bytes too short");
+    let wallet_nonce = u32::from_le_bytes(tx_bytes[64..68].try_into().unwrap());
+
     let pubkey_hash: [u8; 32] = sha256(&pk_bytes);
     let tx_hash:     [u8; 32] = sha256(&tx_bytes);
     sp1_zkvm::io::commit(&pubkey_hash);
     sp1_zkvm::io::commit(&tx_hash);
-    sp1_zkvm::io::commit(&idx);
+    sp1_zkvm::io::commit(&wallet_nonce);
 }

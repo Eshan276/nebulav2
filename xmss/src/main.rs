@@ -120,6 +120,13 @@ fn cmd_sign(key_path: &PathBuf, tx_hex: &str, out: &PathBuf) {
     std::fs::write(key_path, serde_json::to_string_pretty(&key_file).unwrap())
         .expect("failed to update key file");
 
+    // wallet_nonce is at tx_bytes[64..68] (LE u32) — decoupled from XMSS leaf index.
+    let wallet_nonce = if tx_bytes.len() >= 68 {
+        u32::from_le_bytes(tx_bytes[64..68].try_into().unwrap())
+    } else {
+        leaf_index
+    };
+
     // Write proof_inputs.json
     let inputs = ProofInputs {
         algorithm: "XMSS-SHA2_10_256".into(),
@@ -127,7 +134,7 @@ fn cmd_sign(key_path: &PathBuf, tx_hex: &str, out: &PathBuf) {
         tx_bytes: hex::encode(&tx_bytes),
         signature: hex::encode(sig_bytes),
         leaf_index,
-        nonce: leaf_index,
+        nonce: wallet_nonce,
     };
 
     std::fs::write(out, serde_json::to_string_pretty(&inputs).unwrap())

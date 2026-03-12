@@ -1,18 +1,23 @@
 """
-bridge.py — orchestrates the SP1 XMSS ZK proof pipeline:
+bridge.py — orchestrates the XMSS PQ Wallet ZK proof pipeline:
 
-  1. XMSS sign tx → proof_inputs.json
-  2. Submit proof to Sindri (SP1 Groth16)
-  3. Poll until ready
-  4. Parse proof → build stellar contract invoke command
+  1. Compute 108-byte tx_bytes = get_withdraw_msg (contract_id||pubkey_hash||nonce||dest||amount)
+  2. XMSS sign tx → proof_inputs.json
+  3. Submit SP1 Groth16 proof to Sindri
+  4. Poll until ready
+  5. Parse proof → print stellar contract invoke for `withdraw`
 
 Usage:
-    python bridge.py [--skip-sign] [--skip-prove] [--proof-id <id>]
+    python bridge.py --pubkey-hash <hex32> --destination <Gxxxx> --amount <stroops>
+    python bridge.py --pubkey-hash <hex32> --destination <Gxxxx> --amount <stroops> --skip-sign
+    python bridge.py --pubkey-hash <hex32> --destination <Gxxxx> --amount <stroops> --skip-prove
+    python bridge.py --pubkey-hash <hex32> --destination <Gxxxx> --amount <stroops> --proof-id <id>
 
-Env vars:
-    SINDRI_API_KEY        — required for proving
-    VERIFIER_CONTRACT_ID  — deployed Soroban XMSS verifier contract ID
-    STELLAR_SECRET_KEY    — for contract invocation
+Env vars (in .env):
+    WALLET_CONTRACT_ID       — deployed XMSS wallet contract (CCQ4...)
+    WALLET_CONTRACT_HASH     — 32-byte hex inner hash of contract (for tx_bytes)
+    SINDRI_API_KEY           — for Sindri cloud proving
+    STELLAR_SECRET_KEY       — for contract invocation (account alias or key)
 """
 
 import argparse
@@ -21,6 +26,7 @@ import hashlib
 import json
 import os
 import struct
+import subprocess
 import sys
 import time
 import urllib.request
@@ -75,13 +81,65 @@ def bincode_vec_u8(data: bytes) -> bytes:
 
 
 def build_sp1_stdin(pk: bytes, tx: bytes, sig: bytes) -> dict:
-    """Build the SP1Stdin JSON that Sindri expects."""
     buffer = [
         list(bincode_vec_u8(pk)),
         list(bincode_vec_u8(tx)),
         list(bincode_vec_u8(sig)),
     ]
     return {"buffer": buffer, "ptr": 0, "proofs": []}
+
+
+def stellar_address_to_bytes(addr: str) -> bytes:
+    """Decode a Stellar strkey address to its raw 32-byte key/hash payload.
+
+    Strips the 1-byte version prefix and 2-byte CRC16 checksum.
+    Works for both G... (ed25519 pubkey) and C... (contract ID) addresses.
+    """
+    pad = (8 - len(addr) % 8) % 8
+    decoded = base64.b32decode(addr + "=" * pad)
+    return decoded[1:-2]
+
+
+def stellar_address_to_contract_field(addr: str) -> bytes:
+    """Return the 32-byte field the Soroban contract uses for this address in tx_bytes.
+
+    Replicates Address::to_xdr(env).slice(4..36):
+      - C... (contract):  [0,0,0,0] discriminant(4) is at [0..4], payload at [4..36]
+                          → returns the 32-byte contract hash  ✓
+      - G... (account):   XDR = [0,0,0,1][0,0,0,0] + ed25519_key(32) = 40 bytes
+                          slice(4..36) = [0,0,0,0] + key[0:28]
+                          → returns [0,0,0,0] + first_28_bytes_of_key
+    """
+    raw = stellar_address_to_bytes(addr)
+    if addr.startswith("C"):
+        # contract address: XDR = [0,0,0,0] + 32-byte hash → slice(4..36) = hash
+        return raw
+    else:
+        # account address: XDR = [0,0,0,1,0,0,0,0] + 32-byte key → slice(4..36)
+        # = [0,0,0,0] + key[0:28]
+        return b"\x00\x00\x00\x00" + raw[:28]
+
+
+def build_tx_bytes(
+    contract_hash: bytes,   # 32 bytes — inner hash of wallet contract address
+    pubkey_hash: bytes,     # 32 bytes — sha256(xmss_pubkey)
+    nonce: int,             # u32 — current wallet nonce
+    destination_bytes: bytes,  # 32 bytes — inner payload of destination address
+    amount: int,            # i64 stroops
+) -> bytes:
+    """Build the 108-byte tx that the user signs, matching build_tx_bytes in lib.rs."""
+    assert len(contract_hash) == 32
+    assert len(pubkey_hash) == 32
+    assert len(destination_bytes) == 32
+    tx = (
+        contract_hash
+        + pubkey_hash
+        + struct.pack("<I", nonce)
+        + destination_bytes
+        + struct.pack(">q", amount)
+    )
+    assert len(tx) == 108
+    return tx
 
 
 def decode_msgpack_proof(raw: bytes) -> dict:
@@ -134,8 +192,7 @@ def decode_msgpack_proof(raw: bytes) -> dict:
 
 def build_proof_bytes(enc_proof: bytes, vkey_hash: bytes) -> bytes:
     """Prepend 4-byte selector to get 260-byte SP1 Groth16 proof."""
-    selector = vkey_hash[:4]
-    return selector + enc_proof
+    return vkey_hash[:4] + enc_proof
 
 
 def build_public_values(proof_inputs: dict) -> bytes:
@@ -149,34 +206,64 @@ def build_public_values(proof_inputs: dict) -> bytes:
     return pubkey_hash + tx_hash + nonce
 
 
+def get_wallet_nonce(pubkey_hash_hex: str, contract_id: str) -> int:
+    """Query the wallet contract for the current nonce of a pubkey_hash."""
+    try:
+        result = subprocess.run(
+            [
+                "stellar", "contract", "invoke",
+                "--id", contract_id,
+                "--network", "testnet",
+                "--", "nonce",
+                "--pubkey_hash", pubkey_hash_hex,
+            ],
+            capture_output=True, text=True, check=True,
+        )
+        return int(result.stdout.strip().strip('"'))
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: could not query nonce: {e.stderr[:200]}")
+        print("Using nonce=0")
+        return 0
+
+
 # ── steps ─────────────────────────────────────────────────────────────────────
 
-def step_sign():
-    """XMSS sign the tx → proof_inputs.json via xmss CLI."""
+def step_sign(pubkey_hash_hex: str, destination: str, amount: int):
+    """Build tx_bytes, XMSS sign → proof_inputs.json."""
     xmss_bin = ROOT / "xmss" / "target" / "release" / "xmss"
     key_file  = ROOT / "key.json"
 
     if not xmss_bin.exists():
         print("Building XMSS binary...")
-        import subprocess
-        r = subprocess.run(
-            ["cargo", "build", "--release"],
-            cwd=ROOT / "xmss",
-        )
+        r = subprocess.run(["cargo", "build", "--release"], cwd=ROOT / "xmss")
         if r.returncode != 0:
             sys.exit("xmss build failed")
 
     if not key_file.exists():
         print("Generating XMSS keypair...")
-        import subprocess
-        subprocess.run(
-            [str(xmss_bin), "keygen", "--out", str(key_file)],
-            check=True,
-        )
+        subprocess.run([str(xmss_bin), "keygen", "--out", str(key_file)], check=True)
+
+    contract_id = os.environ.get("WALLET_CONTRACT_ID", "")
+    if not contract_id:
+        sys.exit("WALLET_CONTRACT_ID not set in .env")
+
+    contract_hash_hex = os.environ.get("WALLET_CONTRACT_HASH", "")
+    if not contract_hash_hex:
+        sys.exit("WALLET_CONTRACT_HASH not set in .env")
+
+    contract_hash = bytes.fromhex(contract_hash_hex)
+    pubkey_hash = bytes.fromhex(pubkey_hash_hex)
+    dest_bytes = stellar_address_to_contract_field(destination)
+
+    # Get current nonce from chain
+    nonce = get_wallet_nonce(pubkey_hash_hex, contract_id)
+    print(f"Wallet nonce: {nonce}")
+
+    tx_bytes = build_tx_bytes(contract_hash, pubkey_hash, nonce, dest_bytes, amount)
+    tx_hex = tx_bytes.hex()
+    print(f"tx_bytes ({len(tx_bytes)} bytes): {tx_hex[:32]}...")
 
     print("Signing tx with XMSS...")
-    import subprocess
-    tx_hex = "deadbeef" + "00" * 508  # 512-byte dummy tx
     subprocess.run(
         [str(xmss_bin), "sign", "--key", str(key_file), "--tx", tx_hex, "--out", str(PROOF_INPUTS)],
         check=True,
@@ -219,8 +306,8 @@ def step_poll(proof_id: str) -> dict:
     sys.exit("\nTimed out waiting for proof")
 
 
-def step_parse_and_print(detail: dict, inputs: dict):
-    """Parse the Groth16 proof and print the stellar contract invoke command."""
+def step_parse_and_print(detail: dict, inputs: dict, destination: str, amount: int):
+    """Parse the Groth16 proof and print the stellar contract invoke for withdraw."""
     proof_b64 = detail["proof"]["proof"]
     raw = base64.b64decode(proof_b64)
     parsed = decode_msgpack_proof(raw)
@@ -229,14 +316,14 @@ def step_parse_and_print(detail: dict, inputs: dict):
     vkey_hash  = parsed["vkey_hash"]   # 32 bytes
     pub_inputs = parsed["pub_inputs"]  # [str, str]
 
-    proof_bytes     = build_proof_bytes(enc_proof, vkey_hash)
-    public_values   = build_public_values(inputs)
+    proof_bytes   = build_proof_bytes(enc_proof, vkey_hash)
+    public_values = build_public_values(inputs)
 
-    # program_vkey = pub_inputs[0] as 32-byte BE
     program_vkey_int = int(pub_inputs[0])
     program_vkey = program_vkey_int.to_bytes(32, "big")
 
-    # Save to cache
+    nonce = struct.unpack("<I", public_values[64:])[0]
+
     cache = {
         "proof_id":       detail["proof_id"],
         "proof_bytes":    proof_bytes.hex(),
@@ -245,14 +332,15 @@ def step_parse_and_print(detail: dict, inputs: dict):
         "vkey_hash":      vkey_hash.hex(),
         "pubkey_hash":    public_values[:32].hex(),
         "tx_hash":        public_values[32:64].hex(),
-        "nonce":          struct.unpack("<I", public_values[64:])[0],
+        "nonce":          nonce,
+        "destination":    destination,
+        "amount":         amount,
     }
     PROOF_CACHE.write_text(json.dumps(cache, indent=2))
     print(f"Proof cached to {PROOF_CACHE}")
 
-    contract_id = os.environ.get("VERIFIER_CONTRACT_ID", "<deploy first>")
-    secret_key  = os.environ.get("STELLAR_SECRET_KEY", "YOUR_SECRET_KEY")
-    not_deployed = contract_id.startswith("<")
+    contract_id = os.environ.get("WALLET_CONTRACT_ID", "<deploy first>")
+    secret_key  = os.environ.get("STELLAR_SECRET_KEY", "quantum-deployer")
 
     print(f"""
 {'='*70}
@@ -261,90 +349,79 @@ PROOF READY
 proof_bytes   : {len(proof_bytes)} bytes
 public_values : {len(public_values)} bytes
 program_vkey  : {program_vkey.hex()}
-vkey_hash     : {vkey_hash.hex()}
 pubkey_hash   : {public_values[:32].hex()}
 tx_hash       : {public_values[32:64].hex()}
-nonce         : {cache['nonce']}
-""")
+nonce         : {nonce}
+destination   : {destination}
+amount        : {amount} stroops ({amount/10_000_000:.7f} XLM)
 
-    wasm = ROOT / "soroban" / "target" / "wasm32v1-none" / "release" / "sphincs_verifier.wasm"
-
-    if not_deployed:
-        print(f"""── Deploy ──────────────────────────────────────────────────────────────────
-# Build the contract:
-cd {ROOT}/soroban && cargo build --target wasm32v1-none --release
-
-# Deploy:
-stellar contract deploy \\
-  --wasm {wasm} \\
-  --source-account {secret_key} \\
-  --network testnet
-
-# Initialize with program_vkey:
-stellar contract invoke \\
-  --id <CONTRACT_ID> \\
-  --source-account {secret_key} \\
-  --network testnet \\
-  -- init \\
-  --program_vkey {program_vkey.hex()}
-
-# Set VERIFIER_CONTRACT_ID=<CONTRACT_ID> in .env, then re-run bridge.py --skip-prove
-""")
-    else:
-        print(f"""── Verify on Stellar testnet ────────────────────────────────────────────────
+── Withdraw on Stellar testnet ───────────────────────────────────────────────
 stellar contract invoke \\
   --id {contract_id} \\
   --source-account {secret_key} \\
   --network testnet \\
-  -- verify_xmss_tx \\
+  -- withdraw \\
   --proof_bytes {proof_bytes.hex()} \\
-  --public_values {public_values.hex()}
+  --public_values {public_values.hex()} \\
+  --destination {destination} \\
+  --amount {amount}
 """)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--skip-sign",  action="store_true", help="Skip signing, use existing proof_inputs.json")
-    parser.add_argument("--skip-prove", action="store_true", help="Skip proving, use cached groth16_proof.json")
-    parser.add_argument("--proof-id",   help="Use an existing Sindri proof ID")
+    parser = argparse.ArgumentParser(description="XMSS PQ Wallet bridge")
+    parser.add_argument("--pubkey-hash",  required=False, default="",
+                        help="sha256(xmss_pubkey) as 64-char hex")
+    parser.add_argument("--destination",  required=False, default="",
+                        help="Stellar destination address (G...)")
+    parser.add_argument("--amount",       type=int, default=0,
+                        help="Amount in stroops (1 XLM = 10_000_000)")
+    parser.add_argument("--skip-sign",    action="store_true")
+    parser.add_argument("--skip-prove",   action="store_true")
+    parser.add_argument("--proof-id",     help="Use an existing Sindri proof ID")
     args = parser.parse_args()
 
     if not args.skip_sign and not args.skip_prove and not args.proof_id:
-        step_sign()
+        if not args.pubkey_hash or not args.destination or not args.amount:
+            sys.exit("--pubkey-hash, --destination, and --amount are required for signing")
+        step_sign(args.pubkey_hash, args.destination, args.amount)
     else:
         if not PROOF_INPUTS.exists():
             sys.exit("proof_inputs.json not found — run without --skip-sign first")
-        print(f"Using existing proof_inputs.json (leaf_index={json.loads(PROOF_INPUTS.read_text()).get('leaf_index',0)})")
+        existing = json.loads(PROOF_INPUTS.read_text())
+        print(f"Using existing proof_inputs.json (leaf_index={existing.get('leaf_index',0)})")
 
     inputs = json.loads(PROOF_INPUTS.read_text())
+    destination = args.destination or ""
+    amount      = args.amount or 0
 
     if args.skip_prove:
         if not PROOF_CACHE.exists():
             sys.exit("groth16_proof.json not found — run without --skip-prove first")
         cache = json.loads(PROOF_CACHE.read_text())
         print(f"Using cached proof {cache['proof_id'][:8]}...")
-        proof_bytes   = bytes.fromhex(cache["proof_bytes"])
-        public_values = bytes.fromhex(cache["public_values"])
-        program_vkey  = bytes.fromhex(cache["program_vkey"])
-        contract_id   = os.environ.get("VERIFIER_CONTRACT_ID", "<deploy first>")
-        secret_key    = os.environ.get("STELLAR_SECRET_KEY", "YOUR_SECRET_KEY")
-        wasm = ROOT / "soroban" / "target" / "wasm32v1-none" / "release" / "sphincs_verifier.wasm"
+        contract_id = os.environ.get("WALLET_CONTRACT_ID", "<deploy first>")
+        secret_key  = os.environ.get("STELLAR_SECRET_KEY", "quantum-deployer")
+        destination = destination or cache.get("destination", "")
+        amount      = amount or cache.get("amount", 0)
         print(f"""
 stellar contract invoke \\
   --id {contract_id} \\
   --source-account {secret_key} \\
   --network testnet \\
-  -- verify_xmss_tx \\
-  --proof_bytes {proof_bytes.hex()} \\
-  --public_values {public_values.hex()}
+  -- withdraw \\
+  --proof_bytes {cache['proof_bytes']} \\
+  --public_values {cache['public_values']} \\
+  --destination {destination} \\
+  --amount {amount}
 """)
         return
 
     proof_id = args.proof_id or step_prove()
     detail   = step_poll(proof_id)
-    step_parse_and_print(detail, inputs)
+    step_parse_and_print(detail, inputs, destination, amount)
     print("Done.")
 
 

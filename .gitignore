@@ -16,6 +16,7 @@ groth16_proof.json
 prover/target/
 soroban/target/
 xmss/target/
+cli/target/
 sp1/program/target/
 sp1/script/target/
 

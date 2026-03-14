@@ -53,6 +53,9 @@ enum Cmd {
         /// Amount in stroops (1 XLM = 10_000_000)
         #[arg(long)]
         amount: i64,
+        /// Recipient wallet ID (pubkey_hash hex, 64 chars). Defaults to your own wallet.
+        #[arg(long)]
+        to: Option<String>,
         /// Source Stellar account alias or key (default: from STELLAR_ACCOUNT env)
         #[arg(long)]
         from: Option<String>,
@@ -313,10 +316,21 @@ fn stellar_to_contract_field(addr: &str) -> Result<[u8; 32]> {
 }
 
 fn run_stellar(args: &[&str]) -> Result<String> {
-    let out = Command::new("stellar")
-        .args(args)
-        .output()
-        .context("stellar CLI not found")?;
+    run_stellar_inner(args, false)
+}
+
+fn run_stellar_silent(args: &[&str]) -> Result<String> {
+    run_stellar_inner(args, true)
+}
+
+fn run_stellar_inner(args: &[&str], silent: bool) -> Result<String> {
+    let mut cmd = Command::new("stellar");
+    cmd.args(args);
+    if silent {
+        cmd.stdout(std::process::Stdio::piped())
+           .stderr(std::process::Stdio::null());
+    }
+    let out = cmd.output().context("stellar CLI not found")?;
     if !out.status.success() {
         let stderr = str::from_utf8(&out.stderr).unwrap_or("?");
         bail!("stellar error: {stderr}");
@@ -383,7 +397,15 @@ fn sindri_prove(api_key: &str, pk: &[u8], tx: &[u8], sig: &[u8]) -> Result<Strin
 }
 
 fn sindri_poll(api_key: &str, proof_id: &str) -> Result<serde_json::Value> {
-    println!("Polling proof {}...", &proof_id[..8]);
+    sindri_poll_inner(api_key, proof_id, true)
+}
+
+fn sindri_poll_silent(api_key: &str, proof_id: &str) -> Result<serde_json::Value> {
+    sindri_poll_inner(api_key, proof_id, false)
+}
+
+fn sindri_poll_inner(api_key: &str, proof_id: &str, verbose: bool) -> Result<serde_json::Value> {
+    if verbose { println!("Polling proof {}...", &proof_id[..8]); }
     for _ in 0..120 {
         let resp: serde_json::Value = ureq::get(&format!("{SINDRI_BASE}/proof/{proof_id}/detail"))
             .header("Authorization", &format!("Bearer {api_key}"))
@@ -393,14 +415,14 @@ fn sindri_poll(api_key: &str, proof_id: &str) -> Result<serde_json::Value> {
 
         match resp["status"].as_str() {
             Some("Ready") => {
-                println!("  Ready ({})", resp["compute_time"].as_str().unwrap_or("?"));
+                if verbose { println!("  Ready ({})", resp["compute_time"].as_str().unwrap_or("?")); }
                 return Ok(resp);
             }
             Some("Failed") | Some("Timed Out") => {
                 bail!("Proof failed: {}", resp["error"].as_str().unwrap_or("?"));
             }
             _ => {
-                print!(".");
+                if verbose { print!("."); }
                 std::io::Write::flush(&mut std::io::stdout()).ok();
                 std::thread::sleep(Duration::from_secs(30));
             }
@@ -700,9 +722,14 @@ fn cmd_wallet_info(cfg: &Config, pubkey_hash_override: Option<String>) -> Result
     Ok(())
 }
 
-fn cmd_fund(cfg: &Config, amount: i64, from_override: Option<String>) -> Result<()> {
-    let key = KeyFile::load(&cfg.key_file)?;
-    let pubkey_hash = hex::encode(key.pubkey_hash()?);
+fn cmd_fund(cfg: &Config, amount: i64, to_override: Option<String>, from_override: Option<String>) -> Result<()> {
+    let pubkey_hash = match to_override {
+        Some(ref h) => h.clone(),
+        None => {
+            let key = KeyFile::load(&cfg.key_file)?;
+            hex::encode(key.pubkey_hash()?)
+        }
+    };
     let from = from_override.as_deref().unwrap_or(&cfg.stellar_account);
 
     println!("Depositing {} stroops ({:.7} XLM) into wallet {}...",
@@ -804,12 +831,22 @@ fn cmd_submit(cfg: &Config, destination: &str, amount: i64) -> Result<()> {
 }
 
 fn do_submit(cfg: &Config, cache: &ProofCache, destination: &str, amount: i64) -> Result<()> {
-    println!("Submitting withdrawal to chain...");
-    println!("  destination : {destination}");
-    println!("  amount      : {amount} stroops ({:.7} XLM)", amount as f64 / 10_000_000.0);
-    println!("  proof nonce : {}", cache.nonce);
+    do_submit_inner(cfg, cache, destination, amount, false).map(|_| ())
+}
 
-    let out = run_stellar(&[
+fn do_submit_silent(cfg: &Config, cache: &ProofCache, destination: &str, amount: i64) -> Result<String> {
+    do_submit_inner(cfg, cache, destination, amount, true)
+}
+
+fn do_submit_inner(cfg: &Config, cache: &ProofCache, destination: &str, amount: i64, silent: bool) -> Result<String> {
+    if !silent {
+        println!("Submitting withdrawal to chain...");
+        println!("  destination : {destination}");
+        println!("  amount      : {amount} stroops ({:.7} XLM)", amount as f64 / 10_000_000.0);
+        println!("  proof nonce : {}", cache.nonce);
+    }
+
+    let out = run_stellar_silent(&[
         "contract", "invoke",
         "--id", &cfg.wallet_contract,
         "--source-account", &cfg.stellar_account,
@@ -821,13 +858,15 @@ fn do_submit(cfg: &Config, cache: &ProofCache, destination: &str, amount: i64) -
         "--amount",        &amount.to_string(),
     ])?;
 
-    println!();
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("  Withdrawal complete!");
-    println!("  tx: {out}");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    if !silent {
+        println!();
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("  Withdrawal complete!");
+        println!("  tx: {out}");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    }
 
-    Ok(())
+    Ok(out)
 }
 
 fn cmd_withdraw(
@@ -910,6 +949,53 @@ fn cmd_withdraw(
     do_submit(cfg, &proof_cache, destination, amount)
 }
 
+// ── Silent withdraw (for TUI — no stdout pollution) ──────────────────────────
+
+fn cmd_withdraw_silent(cfg: &Config, destination: &str, amount: i64) -> Result<String> {
+    let key = KeyFile::load(&cfg.key_file)?;
+    let pubkey_hash = key.pubkey_hash()?;
+    let pubkey_hash_hex = hex::encode(pubkey_hash);
+
+    let nonce_str = run_stellar_silent(&[
+        "contract", "invoke",
+        "--id", &cfg.wallet_contract,
+        "--source-account", &cfg.stellar_account,
+        "--network", "testnet",
+        "--", "nonce",
+        "--pubkey_hash", &pubkey_hash_hex,
+    ])?;
+    let nonce: u32 = nonce_str.trim_matches('"').parse().unwrap_or(0);
+
+    let dest_field = stellar_to_contract_field(destination)?;
+    let tx = build_tx_bytes(&cfg.contract_hash, &pubkey_hash, nonce, &dest_field, amount);
+    let tx_hex = hex::encode(tx);
+
+    ensure_xmss_built(cfg)?;
+    let status = Command::new(&cfg.xmss_bin)
+        .args(["sign", "--key"])
+        .arg(&cfg.key_file)
+        .args(["--tx", &tx_hex, "--out"])
+        .arg(&cfg.proof_inputs)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if !status.success() { bail!("XMSS signing failed"); }
+
+    let inputs: ProofInputs = serde_json::from_str(&std::fs::read_to_string(&cfg.proof_inputs)?)?;
+    let pk  = hex::decode(&inputs.public_key)?;
+    let tx_b = hex::decode(&inputs.tx_bytes)?;
+    let sig = hex::decode(&inputs.signature)?;
+    let proof_id = sindri_prove(&cfg.sindri_api_key, &pk, &tx_b, &sig)?;
+
+    let detail = sindri_poll_silent(&cfg.sindri_api_key, &proof_id)?;
+    let mut cache = parse_proof(&detail, &inputs)?;
+    cache.destination = destination.to_string();
+    cache.amount = amount;
+    std::fs::write(&cfg.proof_cache, serde_json::to_string_pretty(&cache)?)?;
+
+    do_submit_silent(cfg, &cache, destination, amount)
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn ensure_xmss_built(cfg: &Config) -> Result<()> {
@@ -978,8 +1064,7 @@ fn cmd_ui(cfg: &Config) -> Result<()> {
 
     let cfg_ref = cfg;
     tui::run_tui(wallet_info, history, move |dest, amount| {
-        cmd_withdraw(cfg_ref, dest, amount, false, false, None)?;
-        Ok("submitted".to_string())
+        cmd_withdraw_silent(cfg_ref, dest, amount)
     })
 }
 
@@ -1001,7 +1086,7 @@ fn run(cli: Cli) -> Result<()> {
             WalletAction::Create { key_out } => cmd_wallet_create(&cfg, key_out),
             WalletAction::Info { pubkey_hash } => cmd_wallet_info(&cfg, pubkey_hash),
         },
-        Cmd::Fund { amount, from } => cmd_fund(&cfg, amount, from),
+        Cmd::Fund { amount, to, from } => cmd_fund(&cfg, amount, to, from),
         Cmd::Intent { destination, amount } => cmd_intent(&cfg, &destination, amount),
         Cmd::Withdraw { destination, amount, skip_sign, skip_prove, proof_id } =>
             cmd_withdraw(&cfg, &destination, amount, skip_sign, skip_prove, proof_id),

@@ -19,6 +19,12 @@ xmss/target/
 cli/target/
 sp1/program/target/
 sp1/script/target/
+xmss-wasm/target/
+xmss-wasm/pkg/
+
+# Extension
+extension/node_modules/
+extension/dist/
 
 # Noir artifacts
 noir/target/

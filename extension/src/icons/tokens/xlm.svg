@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="xlm-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14B8E5"/>
+      <stop offset="100%" stop-color="#0E76FD"/>
+    </linearGradient>
+  </defs>
+  <circle cx="50" cy="50" r="48" fill="url(#xlm-grad)"/>
+  <g fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round">
+    <path d="M25 35 L75 35"/>
+    <path d="M25 50 L65 50"/>
+    <path d="M25 65 L70 65"/>
+  </g>
+</svg>

@@ -168,8 +168,16 @@ impl Config {
         let proof_inputs = root.join("proof_inputs.json");
         let proof_cache  = root.join("groth16_proof.json");
 
-        // xmss binary: look in xmss/target/release/xmss
-        let xmss_bin = root.join("xmss").join("target").join("release").join("xmss");
+        // xmss binary: prefer project build, fall back to installed binary on PATH
+        let xmss_bin = {
+            let project_bin = root.join("xmss").join("target").join("release").join("xmss");
+            if project_bin.exists() {
+                project_bin
+            } else {
+                // find xmss on PATH (installed via install.sh)
+                which::which("xmss").unwrap_or(project_bin)
+            }
+        };
 
         Ok(Config {
             project_root: root,

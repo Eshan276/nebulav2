@@ -1,14 +1,14 @@
-<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" version="29.6.1">
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" version="29.6.3">
   <diagram id="nebula-arch" name="Nebula Architecture">
-    <mxGraphModel dx="1489" dy="760" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1200" math="0" shadow="0">
+    <mxGraphModel dx="1708" dy="709" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1200" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
         <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=22;fontStyle=1;fontColor=#1a1a1a;" value="Nebula — Post-Quantum Wallet on Stellar" vertex="1">
-          <mxGeometry height="40" width="1000" x="400" y="30" as="geometry" />
+          <mxGeometry height="40" width="1000" x="180" y="26" as="geometry" />
         </mxCell>
         <mxCell id="sub" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=12;fontColor=#666666;" value="XMSS signing  →  SP1 ZK proof  →  Groth16 / BN254  →  Soroban contract  →  Stellar testnet" vertex="1">
-          <mxGeometry height="24" width="1000" x="400" y="66" as="geometry" />
+          <mxGeometry height="24" width="1000" x="180" y="60" as="geometry" />
         </mxCell>
         <mxCell id="lane-user" parent="1" style="rounded=0;fillColor=#f5f5f5;strokeColor=#d0d0d0;opacity=40;" value="" vertex="1">
           <mxGeometry height="900" width="220" x="40" y="100" as="geometry" />
@@ -202,9 +202,6 @@
         </mxCell>
         <mxCell id="note-why" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#d1d5db;fontSize=10;arcSize=8;align=left;spacingLeft=8;" value="Why relay?&lt;br&gt;&lt;font color=&quot;#6b7280&quot;&gt;Soroban testnet RPC disables&lt;br&gt;BN254 in simulateTransaction.&lt;br&gt;stellar contract invoke runs&lt;br&gt;WASM VM locally. [&lt;b&gt;NOT FOR CLI]&lt;/b&gt;&lt;/font&gt;" vertex="1">
           <mxGeometry height="80" width="180" x="750" y="600" as="geometry" />
-        </mxCell>
-        <mxCell id="note-bn254" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#fbbf24;fontSize=10;arcSize=8;align=left;spacingLeft=8;" value="Quantum note&lt;br/&gt;&lt;font color=&#39;#6b7280&#39;&gt;XMSS: post-quantum (SHA-256)&lt;br/&gt;BN254: quantum-vulnerable (Shor).&lt;br/&gt;Same gap as every ZK project&lt;br/&gt;on every chain today.&lt;/font&gt;" vertex="1">
-          <mxGeometry height="80" width="180" x="520" y="800" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

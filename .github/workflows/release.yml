@@ -16,15 +16,18 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            asset_name: nebula-linux-x86_64
+            nebula_asset: nebula-linux-x86_64
+            xmss_asset:   xmss-linux-x86_64
             flags: RUSTFLAGS='-C target-feature=+crt-static'
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset_name: nebula-macos-aarch64
+            nebula_asset: nebula-macos-aarch64
+            xmss_asset:   xmss-macos-aarch64
             flags: ""
           - os: macos-latest
             target: x86_64-apple-darwin
-            asset_name: nebula-macos-x86_64
+            nebula_asset: nebula-macos-x86_64
+            xmss_asset:   xmss-macos-x86_64
             flags: ""
 
     steps:
@@ -35,7 +38,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build
+      - name: Build nebula
         working-directory: cli
         env:
           NEBULA_WALLET_CONTRACT_ID:   ${{ secrets.WALLET_CONTRACT_ID }}
@@ -43,10 +46,18 @@ jobs:
           NEBULA_SINDRI_API_KEY:       ${{ secrets.SINDRI_API_KEY }}
         run: ${{ matrix.flags }} cargo build --release --target ${{ matrix.target }}
 
-      - name: Rename binary
-        run: cp cli/target/${{ matrix.target }}/release/nebula /tmp/${{ matrix.asset_name }}
+      - name: Build xmss
+        working-directory: xmss
+        run: ${{ matrix.flags }} cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage binaries
+        run: |
+          cp cli/target/${{ matrix.target }}/release/nebula /tmp/${{ matrix.nebula_asset }}
+          cp xmss/target/${{ matrix.target }}/release/xmss  /tmp/${{ matrix.xmss_asset }}
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: /tmp/${{ matrix.asset_name }}
+          files: |
+            /tmp/${{ matrix.nebula_asset }}
+            /tmp/${{ matrix.xmss_asset }}
